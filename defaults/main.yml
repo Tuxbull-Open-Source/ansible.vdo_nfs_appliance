@@ -1,30 +1,25 @@
 ---
-# defaults file for joe-speedboat.vdo_nfs_appliance
-####################################################################################################
-# install and start cockpit web service
-installCockpit: True
+# Optional Cockpit storage dashboard.
+installCockpit: true
 
-#### NFS Export Settings ####
-# comma separated nfs write access. eg: 1.1.2.2,host.domain.tld
+# NFS export clients and options. Use approved network restrictions in production.
 nfsWriteIps: 127.0.0.1
-nfsWriteOpts: (rw,sync,no_wdelay,no_root_squash,insecure)
-# comma separated nfs read access. eg: 1.1.2.2,host.domain.tld
+nfsWriteOpts: '(rw,sync,no_wdelay,no_root_squash,insecure)'
 nfsReadIps: 127.0.0.2
-nfsReadOpts: (ro)
+nfsReadOpts: '(ro)'
 
-#### STORAGE SETUP ####
-# physical storage disk. eg: [sv]d[a-z]
-vdoPhyDev: vdz
+# Destructive VDO backing device: bare non-root disk name only, for example vdb.
+vdoPhyDev: vdb
 vdoDev: "store-{{ vdoPhyDev }}"
+vdoVolumeGroup: "vg-{{ vdoPhyDev }}"
+# Percent of the volume group allocated to the VDO physical pool.
+vdoPhysicalSize: '90%VG'
 vdoMountDir: "/srv/{{ vdoDev }}"
-vdoNfsDir: "/srv/{{ vdoDev }}/nfs"
-# Logical Storage Size
+vdoNfsDir: "{{ vdoMountDir }}/nfs"
 vdoLogicalSize: 2T
 
-#### VDO SETTINGS ####
-# https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/8/html/deduplicating_and_compressing_storage
 vdoIndexmode: sparse
 vdoWritepolicy: sync
-vdoGrowphysical: False
+vdoGrowphysical: false
 vdoDeduplication: enabled
 vdoCompression: enabled

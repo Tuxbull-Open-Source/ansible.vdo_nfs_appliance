@@ -1,8 +1,4 @@
 ---
-# handlers file for joe-speedboat.vdo_nfs_appliance
-####################################################################################################
-- name: reload nfs-server
-  systemd:
-    name: nfs-server
-    state: reloaded
-...
+- name: Reload NFS exports
+  ansible.builtin.command: exportfs -ra
+  changed_when: false
