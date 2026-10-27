@@ -1,8 +1,11 @@
 ---
-- hosts: localhost
-  vars:
-  - vdoPhyDev: vdb
-  - vdoLogicalSize: 5T
-  remote_user: root
+- name: VDO NFS appliance syntax test
+  hosts: all
+  become: true
+  gather_facts: false
   roles:
-    - joe-speedboat.vdo_nfs_appliance
+    - role: vdo_nfs_appliance
+      vars:
+        vdoPhyDev: vdb
+        vdoLogicalSize: 100G
+        installCockpit: false

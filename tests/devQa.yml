@@ -1,9 +1,11 @@
 ---
-- hosts: vm11
-  remote_user: root
-  vars:
-  - vdoPhyDev: vdb
-  - vdoIndexmode: dense
-  - vdoLogicalSize: 5T
+- name: VDO NFS appliance lab QA
+  hosts: vdo_nfs_lab
+  become: true
+  gather_facts: true
   roles:
-    - joe-speedboat.vdo_nfs_appliance
+    - role: vdo_nfs_appliance
+      vars:
+        vdoPhyDev: vdb
+        vdoLogicalSize: 150G
+        installCockpit: false

@@ -1,114 +1,152 @@
 ---
-# tasks file for joe-speedboat.vdo_nfs_appliance
-####################################################################################################
-- name: upgrade all packages
-  dnf:
-    name: "*"
-    state: latest
-    update_cache: yes
-  tags: packages
-- name: install base packages
-  dnf:
-    name: 
-    - kmod-kvdo
-    - vdo
-    - firewalld
-    - nfs-utils
-  tags: packages
-- name: start firewall service
-  systemd:
-    name: firewalld
-    enabled: true
-    state: started
-  tags: firewall
-- name: start vdo service
-  systemd:
-    name: vdo
-    enabled: true
-    state: started
-  tags: vdo
-- name: setup vdo storage
-  vdo:
-    name: "{{ vdoDev }}"
+- name: Validate VDO NFS appliance inputs
+  ansible.builtin.assert:
+    that:
+      - ansible_os_family == 'RedHat'
+      - ansible_distribution_major_version | int >= 10
+      - vdoPhyDev is match('^[a-z]+$')
+      - vdoPhyDev not in ['vda', 'sda', 'nvme0n1']
+      - vdoLogicalSize is match('^[1-9][0-9]*[TGM]$')
+      - vdoNfsDir is match('^/srv/')
+    fail_msg: >-
+      This role supports RHEL-family 10+ targets and requires a non-root,
+      bare disk name plus a valid VDO logical size and /srv NFS path.
+
+- name: Inspect requested VDO backing device
+  ansible.builtin.command:
+    argv: [lsblk, --json, --output, 'NAME,TYPE,FSTYPE,MOUNTPOINTS', "/dev/{{ vdoPhyDev }}"]
+  register: vdo_backing_device
+  changed_when: false
+
+- name: Assert requested VDO backing device is safe for a new VDO appliance
+  ansible.builtin.assert:
+    that:
+      - (vdo_backing_device.stdout | from_json).blockdevices | length == 1
+      - (vdo_backing_device.stdout | from_json).blockdevices[0].type == 'disk'
+      - ((vdo_backing_device.stdout | from_json).blockdevices[0].mountpoints | reject('equalto', none) | list) | length == 0
+      - (vdo_backing_device.stdout | from_json).blockdevices[0].fstype is none or (vdo_backing_device.stdout | from_json).blockdevices[0].fstype == 'LVM2_member'
+      - ((vdo_backing_device.stdout | from_json).blockdevices[0].children | default([])) | length == 0 or (vdo_backing_device.stdout | from_json).blockdevices[0].fstype == 'LVM2_member'
+    fail_msg: >-
+      /dev/{{ vdoPhyDev }} must be an unpartitioned, unmounted whole disk.
+
+- name: Install VDO NFS appliance packages
+  ansible.builtin.dnf:
+    name:
+      - vdo
+      - lvm2
+      - firewalld
+      - nfs-utils
+      - python3
     state: present
-    running: true
-    device: "/dev/{{ vdoPhyDev }}"
-    logicalsize: "{{ vdoLogicalSize }}"
-    compression: "{{ vdoCompression }}"
-    deduplication: "{{ vdoDeduplication }}"
-    growphysical: "{{ vdoGrowphysical }}"
-    writepolicy: "{{ vdoWritepolicy }}"
-    indexmode: "{{ vdoIndexmode }}"
-  tags: vdo
-- name: create filesystem on vdo device
-  filesystem:
-    dev: "/dev/mapper/{{ vdoDev }}"
+
+- name: Inspect LVM physical-volume ownership of requested device
+  ansible.builtin.command:
+    argv: [pvs, --noheadings, --options, vg_name, "/dev/{{ vdoPhyDev }}"]
+  register: vdo_existing_pv
+  changed_when: false
+  failed_when: false
+
+- name: Assert backing disk is blank or belongs to this appliance volume group
+  ansible.builtin.assert:
+    that:
+      - vdo_existing_pv.rc != 0 or (vdo_existing_pv.stdout | trim) == vdoVolumeGroup
+    fail_msg: >-
+      /dev/{{ vdoPhyDev }} is already assigned to LVM volume group
+      '{{ vdo_existing_pv.stdout | trim }}', not '{{ vdoVolumeGroup }}'.
+
+- name: Enable storage and network services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - firewalld
+    - nfs-server
+
+- name: Create LVM volume group for VDO
+  community.general.lvg:
+    vg: "{{ vdoVolumeGroup }}"
+    pvs: "/dev/{{ vdoPhyDev }}"
+    state: present
+
+- name: Inspect existing VDO logical volume
+  ansible.builtin.command:
+    argv: [lvs, --noheadings, --options, lv_name, "{{ vdoVolumeGroup }}/{{ vdoDev }}"]
+  register: vdo_existing_lv
+  changed_when: false
+  failed_when: false
+
+- name: Create LVM VDO logical volume
+  ansible.builtin.command:
+    argv:
+      - lvcreate
+      - --type
+      - vdo
+      - --name
+      - "{{ vdoDev }}"
+      - --extents
+      - "{{ vdoPhysicalSize }}"
+      - --virtualsize
+      - "{{ vdoLogicalSize }}"
+      - --compression
+      - "{{ 'y' if vdoCompression == 'enabled' else 'n' }}"
+      - --deduplication
+      - "{{ 'y' if vdoDeduplication == 'enabled' else 'n' }}"
+      - "{{ vdoVolumeGroup }}"
+  when: vdo_existing_lv.rc != 0
+
+- name: Create XFS filesystem on VDO device
+  community.general.filesystem:
+    dev: "/dev/{{ vdoVolumeGroup }}/{{ vdoDev }}"
     fstype: xfs
     opts: -K
-  tags: vdo
-- name: Mount vdo device
-  mount:
+
+- name: Mount VDO device
+  ansible.posix.mount:
     path: "{{ vdoMountDir }}"
-    src: "/dev/mapper/{{ vdoDev }}"
+    src: "/dev/{{ vdoVolumeGroup }}/{{ vdoDev }}"
     fstype: xfs
-    opts: defaults,x-systemd.requires=vdo.service
+    opts: defaults
     state: mounted
-  tags: vdo
-- name: start nfs service
-  systemd:
-    name: nfs-server
-    enabled: true
-    state: started
-  tags: nfs
-- name: create nfs share dir
-  file:
+
+- name: Create NFS share directory
+  ansible.builtin.file:
     path: "{{ vdoNfsDir }}"
     state: directory
     owner: nobody
     group: nobody
-    mode: 0700
-- name: create nfs read exports
-  copy:
-    dest: "/etc/exports.d/{{vdoDev}}.exports"
-    content: |
-      {{ vdoNfsDir }} {{ nfsWriteIps.split(',') | join(nfsWriteOpts + ' ') }}{{ nfsWriteOpts }} {{ nfsReadIps.split(',') | join(nfsReadOpts + ' ') }}{{ nfsReadOpts }}
-  notify: reload nfs-server
-  tags: nfs
-- name: configure firewall for nfs
-  firewalld:
+    mode: '0700'
+
+- name: Configure NFS exports
+  ansible.builtin.copy:
+    dest: "/etc/exports.d/{{ vdoDev }}.exports"
+    owner: root
+    group: root
+    mode: '0644'
+    content: >-
+      {{ vdoNfsDir }} {{ nfsWriteIps.split(',') | map('trim') | join(nfsWriteOpts + ' ') }}{{ nfsWriteOpts }} {{ nfsReadIps.split(',') | map('trim') | join(nfsReadOpts + ' ') }}{{ nfsReadOpts }}
+  notify: Reload NFS exports
+
+- name: Permit NFS through firewalld
+  ansible.posix.firewalld:
     service: nfs
     permanent: true
     immediate: true
     state: enabled
-  tags:
-  - firewall
-  - nfs
-- name: setup cockpit dashboard
-  block:
-  - name: install cockpit software
-    dnf: 
-      name:
+
+- name: Install cockpit dashboard packages
+  ansible.builtin.dnf:
+    name:
       - cockpit
       - cockpit-pcp
       - cockpit-storaged
       - cockpit-system
-    tags: cockpit
-  - name: enable cockpit
-    systemd:
-      name: cockpit
-      enabled: true
-      state: started
-    tags: cockpit
-  when: installCockpit
-- name: disable cockpit dashboard
-  block:
-  - name: remove cockpit software
-    dnf:
-      name:
-      - cockpit
-      - cockpit-pcp
-      - cockpit-storaged
-      - cockpit-system
-    tags: cockpit
-  when: not installCockpit
-...
+    state: present
+  when: installCockpit | bool
+
+- name: Enable cockpit socket
+  ansible.builtin.systemd:
+    name: cockpit.socket
+    enabled: true
+    state: started
+  when: installCockpit | bool
